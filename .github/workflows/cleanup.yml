@@ -1,0 +1,43 @@
+# Daily: removes the accounts not used for 30 days and those created without data after a day (.github/scripts/cleanup.js), then
+# writes the repository again as one commit, so its history does not grow with every sync. The force push only replaces the main it
+# read (--force-with-lease): a sync pushed in between is not lost (the next run squashes it).
+name: Cleanup
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Without the deploy key the checkout falls back to the read-only token of the workflow and every push is refused: said plainly.
+      - name: Check the deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          if [ -z "$DEPLOY_KEY" ]; then
+            echo "::error::The repository secret DEPLOY_KEY (private key of the deploy key with write access) is missing: nothing can be saved."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          fetch-depth: 1
+
+      - name: Remove old accounts and squash the history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          node .github/scripts/cleanup.js users
+          base=$(git rev-parse HEAD)
+          git checkout -q --orphan squashed
+          git add -A
+          git commit -q -m "Data as of $(date -u +%Y-%m-%d)"
+          git push --force-with-lease=main:"$base" origin squashed:main || echo "main changed meanwhile: squashed at the next run"
