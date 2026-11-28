@@ -1,0 +1,52 @@
+# Receives the changes of an account from the app (repository_dispatch "sync") and merges them into users/<account>.json
+# (.github/scripts/merge.js). The payload is only read by the script, from the event file: never through `${{ }}` inside a script.
+# Pushes with the deploy key (secret DEPLOY_KEY), the only actor the rulesets let push. Runs may overlap (no concurrency group: GitHub
+# would drop the events waiting behind a running one): a push refused because main moved is done again from the latest main, so every
+# event is merged.
+name: Sync
+
+on:
+  repository_dispatch:
+    types: [sync]
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Without the deploy key the checkout falls back to the read-only token of the workflow and every push is refused: said plainly.
+      - name: Check the deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          if [ -z "$DEPLOY_KEY" ]; then
+            echo "::error::The repository secret DEPLOY_KEY (private key of the deploy key with write access) is missing: nothing can be saved."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          fetch-depth: 1
+
+      - name: Merge and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp .github/scripts/merge.js "$RUNNER_TEMP/merge.js"
+          for attempt in 1 2 3 4 5 6 7 8; do
+            git fetch --depth 1 origin main
+            git reset --hard origin/main
+            out=$(node "$RUNNER_TEMP/merge.js" "$GITHUB_EVENT_PATH" users)
+            echo "$out"
+            case "$out" in *changed*) ;; *) exit 0 ;; esac
+            git add users
+            git commit -q -m "sync"
+            if git push origin HEAD:main; then exit 0; fi
+            sleep $((attempt * 3 + RANDOM % 5))
+          done
+          echo "could not push after 8 attempts"
+          exit 1
